@@ -368,11 +368,19 @@ func (r *ReconcileAccount) Reconcile(request reconcile.Request) (reconcile.Resul
 				return reconcile.Result{RequeueAfter: time.Duration(intervalAfterCaseCreationSecs+randomInterval) * time.Second}, nil
 			}
 
+			//resolved, err := checkCaseResolution(reqLogger, currentAcctInstance.Status.SupportCaseID, awsSetupClient)
+			//if err != nil {
+			//	reqLogger.Error(err, "Error checking for Case Resolution")
+			//	return reconcile.Result{}, err
+			//}
+
+			// If testing, do not check for case resolution
 			resolved, err := checkCaseResolution(reqLogger, currentAcctInstance.Status.SupportCaseID, awsSetupClient)
 			if err != nil {
 				reqLogger.Error(err, "Error checking for Case Resolution")
 				return reconcile.Result{}, err
 			}
+			resolved = true
 
 			// Case Resolved, account is Ready
 			if resolved {
@@ -430,6 +438,8 @@ func (r *ReconcileAccount) Reconcile(request reconcile.Request) (reconcile.Resul
 
 				// set state creating if the account was able to create
 				SetAccountStatus(reqLogger, currentAcctInstance, "Attempting to create account", awsv1alpha1.AccountCreating, "Creating")
+				// If testing locally, SupportCaseID is manually set
+				currentAcctInstance.Status.SupportCaseID = "1111111"
 				err = r.Client.Status().Update(context.TODO(), currentAcctInstance)
 				if err != nil {
 					return reconcile.Result{}, err
