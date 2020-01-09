@@ -368,11 +368,18 @@ func (r *ReconcileAccount) Reconcile(request reconcile.Request) (reconcile.Resul
 				return reconcile.Result{RequeueAfter: time.Duration(intervalAfterCaseCreationSecs+randomInterval) * time.Second}, nil
 			}
 
+			//resolved, err := checkCaseResolution(reqLogger, currentAcctInstance.Status.SupportCaseID, awsSetupClient)
+			//if err != nil {
+			//	reqLogger.Error(err, "Error checking for Case Resolution")
+			//	return reconcile.Result{}, err
+			//}
+			// If testing, do not check for case resolution
 			resolved, err := checkCaseResolution(reqLogger, currentAcctInstance.Status.SupportCaseID, awsSetupClient)
 			if err != nil {
 				reqLogger.Error(err, "Error checking for Case Resolution")
 				return reconcile.Result{}, err
 			}
+			resolved = true
 
 			// Case Resolved, account is Ready
 			if resolved {
@@ -430,6 +437,8 @@ func (r *ReconcileAccount) Reconcile(request reconcile.Request) (reconcile.Resul
 
 				// set state creating if the account was able to create
 				SetAccountStatus(reqLogger, currentAcctInstance, "Attempting to create account", awsv1alpha1.AccountCreating, "Creating")
+				// If testing locally, SupportCaseID is manually set
+				currentAcctInstance.Status.SupportCaseID = "1111111"
 				err = r.Client.Status().Update(context.TODO(), currentAcctInstance)
 				if err != nil {
 					return reconcile.Result{}, err
@@ -647,7 +656,7 @@ func (r *ReconcileAccount) BuildAccount(reqLogger logr.Logger, awsClient awsclie
 
 // BuildIAMUser takes all parameters required to create a user, user secret
 func (r *ReconcileAccount) BuildIAMUser(reqLogger logr.Logger, awsClient awsclient.Client, account *awsv1alpha1.Account, iamUserName string, nameSpace string) (string, error) {
-	_, userErr := CreateIAMUser(reqLogger, awsClient, iamUserName)
+	_, userErr := upsertIAMUser(reqLogger, awsClient, iamUserName, account)
 	// TODO: better error handling but for now scrap account
 	if userErr != nil {
 		failedToCreateIAMUserMsg := fmt.Sprintf("Failed to create IAM user %s", iamUserName)
@@ -834,20 +843,33 @@ func checkIAMUserExists(reqLogger logr.Logger, client awsclient.Client, userName
 	return true, nil
 }
 
-// CreateIAMUser takes a client and string and creates a IAMuser
-func CreateIAMUser(reqLogger logr.Logger, client awsclient.Client, userName string) (*iam.CreateUserOutput, error) {
+// upsertIAMUser take a client and string and creates a IAMUser if necessary
+func upsertIAMUser(reqLogger logr.Logger, client awsclient.Client, userName string, account *awsv1alpha1.Account) (*iam.CreateUserOutput, error) {
 
 	// check if username exists for this account
 	userExists, err := checkIAMUserExists(reqLogger, client, userName)
-	if err != nil {
+	if err != nil { //TODO: better error handling
+		failedExistingUserCheck := fmt.Sprintf("Failed to verify existing user: %s", userName)
+		setAccountStatus(reqLogger, account, failedExistingUserCheck, awsv1alpha1.AccountFailed, "Failed")
 		return &iam.CreateUserOutput{}, err
 	}
 
-	// return an error if the IAM user already exists
-	if userExists {
-		return &iam.CreateUserOutput{}, fmt.Errorf("IAM User with the same name already exists cannot create IAM User %s", userName)
+	// deal with the case that an expected user is already in account
+	if userExists && (userName == iamUserNameUHC || userName == iamUserNameSRE) {
+
+		// Rotate access keys for expected users
+		_, err := upsertAccessKey(reqLogger, client, userName, account)
+		if err != nil {
+			failedToCreateUserAccessKeyMsg := fmt.Sprintf("Failed to rotate access key for user: %s", userName)
+			SetAccountStatus(reqLogger, account, failedToCreateUserAccessKeyMsg, awsv1alpha1.AccountFailed, "Failed")
+			return &iam.CreateAccessKeyOutput{}, err
+		}
+		return &iam.CreateUserOutput{}, nil
+	} else if userExists { // case an unexpected user exists in account
+		return &iam.CreateUserOutput{}, fmt.Errorf("Unexpected IAM User with the same name already exists cannot create IAM User %s", userName)
 	}
 
+	// create a new user
 	var createUserOutput = &iam.CreateUserOutput{}
 
 	attempt := 1
