@@ -858,12 +858,42 @@ func upsertIAMUser(reqLogger logr.Logger, client awsclient.Client, userName stri
 	if userExists && (userName == iamUserNameUHC || userName == iamUserNameSRE) {
 
 		// Rotate access keys for expected users
-		_, err := upsertAccessKey(reqLogger, client, userName, account)
+		userSecretInfo, err := upsertAccessKey(reqLogger, client, userName, account)
 		if err != nil {
 			failedToCreateUserAccessKeyMsg := fmt.Sprintf("Failed to rotate access key for user: %s", userName)
 			SetAccountStatus(reqLogger, account, failedToCreateUserAccessKeyMsg, awsv1alpha1.AccountFailed, "Failed")
 			return &iam.CreateAccessKeyOutput{}, err
 		}
+
+		// update user secrets
+		secretName := account.Name
+
+		// Append to secret name if its the SRE admin user secret
+		if iamUserName == iamUserNameSRE {
+			secretName = account.Name + "-" + strings.ToLower(iamUserName)
+		}
+
+		userSecretInput := secretInput{
+			SecretName:              fmt.Sprintf("%s-secret", secretName),
+			NameSpace:               account.Namespace,
+			awsCredsUserName:        userSecretInfo.AccessKey.UserName,
+			awsCredsSecretIDKey:     userSecretInfo.AccessKey.AccessKeyId,
+			awsCredsSecretAccessKey: userSecretInfo.AccessKey.SecretAccessKey,
+		}
+		userSecret := userSecretInput.newSecretforCR()
+		// TODO: this does not currently work, need to output userSecret and update within the reconcile loop or update userSecret from within this function
+		createErr := r.Client.Create(context.TODO(), userSecret)
+		if createErr != nil {
+			failedToCreateUserSecretMsg := fmt.Sprintf("Failed to create secret for IAM user %s", iamUserName)
+			SetAccountStatus(reqLogger, account, failedToCreateUserSecretMsg, awsv1alpha1.AccountFailed, "Failed")
+			err := r.Client.Status().Update(context.TODO(), account)
+			if err != nil {
+				return "", err
+			}
+			reqLogger.Info(failedToCreateUserSecretMsg)
+			return "", createErr
+		}
+
 		return &iam.CreateUserOutput{}, nil
 	} else if userExists { // case an unexpected user exists in account
 		return &iam.CreateUserOutput{}, fmt.Errorf("Unexpected IAM User with the same name already exists cannot create IAM User %s", userName)
